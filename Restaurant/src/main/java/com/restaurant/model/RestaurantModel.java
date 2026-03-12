@@ -1533,7 +1533,16 @@ public class RestaurantModel {
     /**
      * 事务提交前更新内存状态（防止回滚不一致）
      */
-    private void updateMemoryAfterAutoSplit(Tables mainTable, int[] subTableIds, CustomerGroup existingGroup, CustomerGroup newGroup) {
+    /**
+     * 事务提交前更新内存状态（防止回滚不一致）
+     */
+    private void updateMemoryAfterAutoSplit(
+            Tables mainTable,
+            int[] subTableIds,
+            CustomerGroup existingGroup,
+            CustomerGroup newGroup,
+            LocalDateTime originalStartTime) {  // ← 新增参数
+
         // 1. 更新主桌内存状态
         Tables memoryMainTable = tableMap.get(mainTable.getDisplayId());
         if (memoryMainTable != null) {
@@ -1544,7 +1553,7 @@ public class RestaurantModel {
             memoryMainTable.setStartTime(null);
         }
 
-        // 2. 创建子桌A（原顾客组）
+        // 2. 创建子桌A（原顾客组）- ✅ 关键修复点
         Tables subA = new Tables(
                 mainTable.getBaseId(),
                 mainTable.getPhysicalCapacity() / 2,
@@ -1558,7 +1567,9 @@ public class RestaurantModel {
         subA.assignCustomerGroup(existingGroup);
         existingGroup.setTableId(subA.getTableId());
         existingGroup.setAssigned(true);
-        subA.setStartTime(LocalDateTime.now());
+
+        // ⚠️ 关键修复：使用传入的 originalStartTime 而不是 mainTable.getStartTime()
+        subA.setStartTime(originalStartTime != null ? originalStartTime : LocalDateTime.now());
         subA.setActualSeats(existingGroup.getSize());
         subA.setPhysicalCapacity(mainTable.getPhysicalCapacity() / 2);
         subA.setOrderStatus(mainTable.getOrderStatus());
@@ -1588,6 +1599,7 @@ public class RestaurantModel {
         tableMap.put(subA.getDisplayId(), subA);
         tableMap.put(subB.getDisplayId(), subB);
     }
+
 
     /**
      * 尝试自动分裂占用中的餐桌以容纳小型顾客组
@@ -1647,6 +1659,8 @@ public class RestaurantModel {
             throw new SQLException("顾客组ID无效: " + newGroupId + "，可能未在事务开始时正确保存");
         }
 
+        LocalDateTime originalStartTime = targetTable.getStartTime();  // ← 新增
+
         // 步骤3: 通过DAO执行原子分裂操作
         int[] subTableIds = tablesDAO.splitOccupiedTable(
                 conn,
@@ -1670,7 +1684,8 @@ public class RestaurantModel {
         }
 
         // 步骤5: 事务提交前更新内存状态
-        updateMemoryAfterAutoSplit(targetTable, subTableIds, existingGroup, newGroup);
+       // updateMemoryAfterAutoSplit(targetTable, subTableIds, existingGroup, newGroup);
+        updateMemoryAfterAutoSplit(targetTable, subTableIds, existingGroup, newGroup, originalStartTime);
 
         // 步骤6: 从队列移除并标记为已分配
         removeFromAllQueues(newGroup);

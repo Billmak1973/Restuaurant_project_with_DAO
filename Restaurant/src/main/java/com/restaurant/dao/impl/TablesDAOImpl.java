@@ -627,10 +627,9 @@ public class TablesDAOImpl implements TablesDAO {
 
 
     @Override
-    public int[] splitOccupiedTable( Connection conn, int mainTableId, int existingGroupId, int newGroupId, int subTableCapacity
-    ) throws SQLException {
+    public int[] splitOccupiedTable(Connection conn, int mainTableId, int existingGroupId, int newGroupId, int subTableCapacity) throws SQLException {
 
-        // 1️⃣ 更新主桌状态 → SPLITTING
+        // 1️⃣ 更新主桌狀態 → SPLITTING
         String updateMainSql = """
         UPDATE restaurant_tables 
         SET status = 'SPLITTING', 
@@ -644,28 +643,34 @@ public class TablesDAOImpl implements TablesDAO {
         try (PreparedStatement ps = conn.prepareStatement(updateMainSql)) {
             ps.setInt(1, mainTableId);
             if (ps.executeUpdate() != 1) {
-                throw new SQLException("更新主桌状态失败");
+                throw new SQLException("更新主桌狀態失敗");
             }
         }
 
-        // 2️⃣ 获取主桌基础信息
+        // 2️⃣ 獲取主桌基礎信息（✅ 關鍵改動：增加 start_time 查詢）
         String selectBaseSql = """
-        SELECT base_id, display_id 
+        SELECT base_id, display_id, start_time 
         FROM restaurant_tables 
         WHERE table_id = ?
     """;
         int baseId;
         String baseDisplayId;
+        LocalDateTime originalStartTime = null;  // ✅ 新增：存儲原開始時間
         try (PreparedStatement ps = conn.prepareStatement(selectBaseSql)) {
             ps.setInt(1, mainTableId);
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) throw new SQLException("主桌不存在");
                 baseId = rs.getInt("base_id");
                 baseDisplayId = rs.getString("display_id");
+                // ✅ 獲取原開始時間
+                Timestamp ts = rs.getTimestamp("start_time");
+                if (ts != null) {
+                    originalStartTime = ts.toLocalDateTime();
+                }
             }
         }
 
-        // 3️⃣ 插入两个子桌
+        // 3️⃣ 插入兩個子桌
         String insertSubSql = """
         INSERT INTO restaurant_tables (
             display_id, base_id, capacity, physical_capacity, 
@@ -676,10 +681,9 @@ public class TablesDAOImpl implements TablesDAO {
 
         int[] subTableIds = new int[2];
 
-        try (PreparedStatement ps =
-                     conn.prepareStatement(insertSubSql, Statement.RETURN_GENERATED_KEYS)) {
+        try (PreparedStatement ps = conn.prepareStatement(insertSubSql, Statement.RETURN_GENERATED_KEYS)) {
 
-            // 子桌 A（原顾客组）
+            // ========== 子桌 A（原顧客組）==========
             ps.setString(1, baseDisplayId + "a");
             ps.setInt(2, baseId);
             ps.setInt(3, subTableCapacity);
@@ -690,10 +694,11 @@ public class TablesDAOImpl implements TablesDAO {
             ps.setInt(8, existingGroupId);
             ps.setString(9, "a");
             ps.setInt(10, mainTableId);
-            ps.setTimestamp(11, Timestamp.valueOf(LocalDateTime.now()));
+            // ✅ 關鍵改動：繼承原主桌的開始時間（若為空則用當前時間兜底）
+            ps.setTimestamp(11, Timestamp.valueOf(originalStartTime != null ? originalStartTime : LocalDateTime.now()));
             ps.addBatch();
 
-            // 子桌 B（新顾客组）
+            // ========== 子桌 B（新顧客組）==========
             ps.setString(1, baseDisplayId + "b");
             ps.setInt(2, baseId);
             ps.setInt(3, subTableCapacity);
@@ -704,6 +709,7 @@ public class TablesDAOImpl implements TablesDAO {
             ps.setInt(8, newGroupId);
             ps.setString(9, "b");
             ps.setInt(10, mainTableId);
+            // 新顧客組使用當前時間（他們剛剛入座）
             ps.setTimestamp(11, Timestamp.valueOf(LocalDateTime.now()));
             ps.addBatch();
 
@@ -718,10 +724,10 @@ public class TablesDAOImpl implements TablesDAO {
         }
 
         if (subTableIds[0] <= 0 || subTableIds[1] <= 0) {
-            throw new SQLException("生成子桌 ID 失败");
+            throw new SQLException("生成子桌 ID 失敗");
         }
 
-        // 🔴🔴🔴 4️⃣【关键补丁】同步更新 customer_groups.table_id
+        // 🔴🔴🔴 4️⃣【關鍵補丁】同步更新 customer_groups.table_id
         String updateGroupSql = """
         UPDATE customer_groups
         SET table_id = ?, is_assigned = 1
@@ -729,12 +735,12 @@ public class TablesDAOImpl implements TablesDAO {
     """;
         try (PreparedStatement ps = conn.prepareStatement(updateGroupSql)) {
 
-            // 原顾客组 → 子桌 A
+            // 原顧客組 → 子桌 A
             ps.setInt(1, subTableIds[0]);
             ps.setInt(2, existingGroupId);
             ps.executeUpdate();
 
-            // 新顾客组 → 子桌 B
+            // 新顧客組 → 子桌 B
             ps.setInt(1, subTableIds[1]);
             ps.setInt(2, newGroupId);
             ps.executeUpdate();
@@ -743,11 +749,6 @@ public class TablesDAOImpl implements TablesDAO {
         return subTableIds; // [subA_id, subB_id]
     }
 
-
-
-
-
-    @Override
     public void updateMergedPairToVacant(int tableId1, int tableId2, Connection conn) throws SQLException {
         String sql = """
         UPDATE restaurant_tables 
